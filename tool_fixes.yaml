@@ -1,0 +1,92 @@
+# Configuration for tool call fixes
+# Each tool can have multiple fix rules applied
+
+tools:
+  todowrite:
+    # Fix todos parameter when it's a JSON string instead of array
+    fixes:
+      - name: "todos_string_to_array"
+        parameter: "todos"
+        condition: "is_string"
+        action: "parse_json_array"
+        fallback_value: []
+        description: "Convert todos string to array"
+  
+  bash:
+    # Add mandatory description parameter if missing
+    fixes:
+      - name: "missing_description"
+        parameter: "description" 
+        condition: "missing_or_empty"
+        action: "set_default"
+        default_value: "Execute the given shell command"
+        description: "Add missing bash description"
+  
+  edit:
+    # Fix replaceAll parameter when it's a string instead of boolean
+    fixes:
+      - name: "replace_all_string_to_boolean"
+        parameter: "replaceAll"
+        condition: "is_string"
+        action: "convert_string_to_boolean"
+        description: "Convert replaceAll string to boolean"
+      - name: "replace_all_string_to_boolean_alt"
+        parameter: "replace_all"
+        condition: "is_string"
+        action: "convert_string_to_boolean"
+        description: "Convert replace_all string to boolean"
+  
+  multiedit:
+    # Ensure edits parameter is properly formatted
+    fixes:
+      - name: "edits_validation"
+        parameter: "edits"
+        condition: "is_string"
+        action: "parse_json_array"
+        fallback_value: []
+        description: "Convert edits string to array"
+  
+  glob:
+    # Add default path if missing
+    fixes:
+      - name: "default_path"
+        parameter: "path"
+        condition: "missing"
+        action: "set_default"
+        default_value: "."
+        description: "Add default path for glob"
+
+  grep:
+    # Ensure output_mode has valid value
+    fixes:
+      - name: "output_mode_validation"
+        parameter: "output_mode"
+        condition: "invalid_enum"
+        valid_values: ["content", "files_with_matches", "count"]
+        action: "set_default"
+        default_value: "files_with_matches"
+        description: "Fix invalid output_mode"
+
+  task:
+    # Add default subagent_type if missing
+    fixes:
+      - name: "default_subagent_type"
+        parameter: "subagent_type"
+        condition: "missing"
+        action: "set_default"
+        default_value: "general-purpose"
+        description: "Add default subagent_type"
+
+# Global settings
+settings:
+  # Timeout for clearing abandoned buffers (seconds) 
+  buffer_timeout: 120  # Increased to 2 minutes for long tool calls
+  
+  # Maximum buffer size per tool call (bytes)
+  max_buffer_size: 1048576  # 1MB
+  
+  # Enable detailed logging
+  detailed_logging: true
+  
+  # Case sensitive tool name matching
+  case_sensitive_tools: false

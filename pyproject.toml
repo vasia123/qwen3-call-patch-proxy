@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen3-call-patch-proxy"
+version = "1.0.0"
+description = "HTTP proxy that fixes malformed tool calls from Qwen3-Coder LLM models for Claude Code"
+readme = "README.md"
+authors = [
+    {name = "Community", email = "noreply@example.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers", 
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9", 
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["qwen3", "llm", "proxy", "tool-calls", "claude-code", "streaming", "sse"]
+requires-python = ">=3.8"
+dependencies = [
+    "aiohttp>=3.8.0",
+    "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/qwen3-call-patch-proxy"
+"Bug Reports" = "https://github.com/yourusername/qwen3-call-patch-proxy/issues"
+"Source Code" = "https://github.com/yourusername/qwen3-call-patch-proxy"
+
+[project.scripts]
+qwen3-call-patch-proxy = "call_patch_proxy:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"*" = ["*.yaml", "*.yml"]
