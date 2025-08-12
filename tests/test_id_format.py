@@ -15,7 +15,7 @@ from call_patch_proxy import (
 )
 
 async def test_id_format():
-    """Test that generated tool call IDs match Claude Code expectations"""
+    """Test that generated tool call IDs match OpenCode expectations"""
     print("Testing tool call ID format:")
     
     # Create request state
@@ -58,7 +58,7 @@ async def test_id_format():
             # Check if ID matches expected format: call_<24_hex_chars>
             id_pattern = r"^call_[a-f0-9]{24}$"
             if re.match(id_pattern, call_id):
-                print("  ✓ ID format matches Claude Code pattern")
+                print("  ✓ ID format matches OpenCode pattern")
                 
                 # Verify other required fields
                 if "index" in tool_call and isinstance(tool_call["index"], int):

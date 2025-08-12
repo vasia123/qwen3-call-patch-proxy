@@ -68,7 +68,7 @@ async def test_argument_replacement():
                         print("  ✓ Index field is present")
                         return True
                     else:
-                        print("  ✗ Index field is missing (required by Claude Code)")
+                        print("  ✗ Index field is missing (required by OpenCode)")
                         return False
                 else:
                     print("  ✗ Arguments don't have proper todos array")

@@ -1,10 +1,10 @@
 # Qwen3 Call Patch Proxy
 
-A robust HTTP proxy server that fixes malformed tool calls from Qwen3-Coder LLM models before sending them to Claude Code or other downstream services.
+A robust HTTP proxy server that fixes malformed tool calls from Qwen3-Coder LLM models before sending them to OpenCode or other downstream services.
 
 ## Problem Statement
 
-Qwen3-Coder models generate tool calls with format inconsistencies that cause errors in Claude Code:
+Qwen3-Coder models generate tool calls with format inconsistencies that cause errors in OpenCode:
 - **String parameters instead of arrays** (e.g., `todos` parameter as JSON string instead of array)  
 - **String booleans instead of actual booleans** (e.g., `"True"` instead of `true`)
 - **Fragmented tool calls** sent across multiple Server-Sent Events (SSE)
@@ -13,11 +13,11 @@ Qwen3-Coder models generate tool calls with format inconsistencies that cause er
 
 ## Solution
 
-This proxy intercepts HTTP requests between your Qwen3 model server and Claude Code, automatically:
+This proxy intercepts HTTP requests between your Qwen3 model server and OpenCode, automatically:
 
 ✅ **Consolidates fragmented tool calls** across multiple SSE events  
 ✅ **Converts string parameters to proper types** (string→array, string→boolean)  
-✅ **Generates proper tool call IDs** in Claude Code format (`call_<24_hex_chars>`)  
+✅ **Generates proper tool call IDs** in OpenCode format (`call_<24_hex_chars>`)  
 ✅ **Adds missing required parameters** with sensible defaults  
 ✅ **Handles various tool types** (TodoWrite, Edit, Bash, Task, MultiEdit, etc.)  
 ✅ **Provides comprehensive logging** for debugging
@@ -27,7 +27,7 @@ This proxy intercepts HTTP requests between your Qwen3 model server and Claude C
 ### Prerequisites
 - Python 3.8+
 - A running Qwen3-Coder model server (typically on port 8080)
-- Claude Code or compatible client
+- OpenCode or compatible client
 
 ### Installation
 
@@ -47,17 +47,17 @@ This proxy intercepts HTTP requests between your Qwen3 model server and Claude C
    python call_patch_proxy.py
    ```
 
-4. **Configure Claude Code to use the proxy:**
-   Point Claude Code to `http://localhost:7999` instead of your model server directly.
+4. **Configure OpenCode to use the proxy:**
+   Point OpenCode to `http://localhost:7999` instead of your model server directly.
 
 ### Architecture
 
 ```
-Claude Code ──→ Proxy (port 7999) ──→ Qwen3 Server (port 8080)
+OpenCode ──→ Proxy (port 7999) ──→ Qwen3 Server (port 8080)
                     ↓
                 Fix tool calls
                     ↓
-Claude Code ←── Fixed responses ←──── Qwen3 Server
+OpenCode ←── Fixed responses ←──── Qwen3 Server
 ```
 
 ## Supported Tools
@@ -221,7 +221,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## Acknowledgments
 
-- Built for the [Claude Code](https://claude.ai/code) ecosystem
+- Built for the OpenCode ecosystem
 - Designed to work with Qwen3-Coder models from Alibaba Cloud
 - Inspired by the need for robust LLM tool call handling
 

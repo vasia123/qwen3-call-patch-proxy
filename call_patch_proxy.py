@@ -3,7 +3,7 @@
 Qwen3 Call Patch Proxy
 
 A robust HTTP proxy server that fixes malformed tool calls from Qwen3-Coder LLM models
-before sending them to Claude Code or other downstream services.
+before sending them to OpenCode or other downstream services.
 
 This proxy handles common issues like:
 - String parameters that should be arrays/objects
@@ -431,10 +431,10 @@ async def process_sse_event(event: dict, request_id: str) -> dict:
                 fixed_args = await get_fixed_arguments(buffer, request_id)
                 if fixed_args:
                     # Replace all fragment tool_calls with a single complete one
-                    # Use the original call ID format that Claude Code expects
+                    # Use the original call ID format that OpenCode expects
                     fixed_call_id = f"call_{uuid.uuid4().hex[:24]}"
                     delta["tool_calls"] = [{
-                        "index": 0,  # Required by Claude Code
+                        "index": 0,  # Required by OpenCode
                         "id": fixed_call_id,
                         "function": {
                             "name": buffer.tool_name,
@@ -571,7 +571,7 @@ async def process_remaining_buffers(request_id: str, response):
                         "choices": [{
                             "delta": {
                                 "tool_calls": [{
-                                    "index": 0,  # Required by Claude Code
+                                    "index": 0,  # Required by OpenCode
                                     "id": completion_call_id,
                                     "function": {
                                         "name": buffer.tool_name,

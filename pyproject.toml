@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "qwen3-call-patch-proxy"
 version = "1.0.0"
-description = "HTTP proxy that fixes malformed tool calls from Qwen3-Coder LLM models for Claude Code"
+description = "HTTP proxy that fixes malformed tool calls from Qwen3-Coder LLM models for OpenCode"
 readme = "README.md"
 authors = [
     {name = "Community", email = "noreply@example.com"}

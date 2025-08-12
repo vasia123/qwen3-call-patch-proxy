@@ -18,7 +18,7 @@ setup(
     name="qwen3-call-patch-proxy",
     version="1.0.0",
     author="Community",
-    description="HTTP proxy that fixes malformed tool calls from Qwen3-Coder LLM models for Claude Code",
+    description="HTTP proxy that fixes malformed tool calls from Qwen3-Coder LLM models for OpenCode",
     long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/qwen3-call-patch-proxy",
