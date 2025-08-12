@@ -22,6 +22,14 @@ This proxy intercepts HTTP requests between your Qwen3 model server and OpenCode
 ✅ **Handles various tool types** (TodoWrite, Edit, Bash, Task, MultiEdit, etc.)  
 ✅ **Provides comprehensive logging** for debugging
 
+## Demo
+
+Here's OpenCode successfully creating Conway's Game of Life using Qwen3-Coder with the proxy:
+
+<img src="images/OpenCode-Qwen3-Coder-GameOfLife.png" alt="OpenCode creating Game of Life with Qwen3-Coder" width="600">
+
+*OpenCode planning and implementing a complete Game of Life with GUI using Qwen3-Coder model through the proxy*
+
 ## Quick Start
 
 ### Prerequisites
@@ -217,7 +225,7 @@ LOG_LEVEL = logging.DEBUG  # In call_patch_proxy.py
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GPL-3.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
