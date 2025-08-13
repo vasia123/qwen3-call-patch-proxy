@@ -185,6 +185,10 @@ The proxy uses a **dual logging system**:
 - Buffer management and fragment processing
 - Debug traces with function names and line numbers
 
+<img src="images/OpenCode-Qwen3-Coder-Logs.png" alt="Qwen3 Call Patch Proxy logs showing intelligent tool conversion" width="600">
+
+*Real-time logs showing the proxy intelligently converting malformed tool calls and fixing parameter issues*
+
 ```bash
 # Start the proxy (clean console output)
 python call_patch_proxy.py
