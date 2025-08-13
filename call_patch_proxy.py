@@ -74,6 +74,7 @@ class RequestState:
     request_id: str
     tool_buffers: Dict[str, ToolBuffer] = field(default_factory=dict)
     created_at: datetime = field(default_factory=datetime.now)
+    content_buffer: str = ""  # Buffer for accumulating XML content
     
     def cleanup_expired_buffers(self, timeout_seconds: int):
         expired_ids = [
@@ -359,6 +360,44 @@ async def process_sse_event(event: dict, request_id: str) -> dict:
     delta = choice.get("delta", {})
     finish_reason = choice.get("finish_reason")
     
+    # Accumulate content and check for XML-format tool calls
+    content = delta.get("content", "")
+    if content:
+        # Add content to buffer
+        request_state.content_buffer += content
+        
+        # Check if we have a complete XML tool call
+        xml_tool_call = detect_and_convert_xml_tool_call(request_state.content_buffer)
+        if xml_tool_call:
+            logger.info(f"[{request_id}] Detected XML tool call, converting to JSON format")
+            
+            # Create proper JSON tool call format
+            fixed_call_id = f"call_{uuid.uuid4().hex[:24]}"
+            args_str = json.dumps(xml_tool_call["arguments"], ensure_ascii=False)
+            
+            # Replace content with tool_calls
+            delta["tool_calls"] = [{
+                "index": 0,
+                "id": fixed_call_id,
+                "function": {
+                    "name": xml_tool_call["function_name"],
+                    "arguments": args_str
+                }
+            }]
+            # Remove the XML content to prevent display
+            delta["content"] = ""
+            
+            # Clear the content buffer since we processed the tool call
+            request_state.content_buffer = ""
+            
+            logger.debug(f"[{request_id}] Converted XML to JSON tool call: {xml_tool_call['function_name']}")
+        else:
+            # Check if buffer is getting too large and clear it periodically
+            max_buffer_size = fix_engine.get_setting('max_buffer_size', 1048576)
+            if len(request_state.content_buffer) > max_buffer_size:
+                logger.warning(f"[{request_id}] Content buffer exceeded size limit, clearing")
+                request_state.content_buffer = ""
+    
     if "tool_calls" not in delta:
         # Check if we need to process buffers on finish_reason
         if finish_reason == "tool_calls":
@@ -429,7 +468,7 @@ async def process_sse_event(event: dict, request_id: str) -> dict:
             if buffer.content and is_json_complete(buffer.content):
                 # Process the complete tool call and get fixed arguments
                 fixed_args = await get_fixed_arguments(buffer, request_id)
-                if fixed_args:
+                if fixed_args and buffer.tool_name:
                     # Replace all fragment tool_calls with a single complete one
                     # Use the original call ID format that OpenCode expects
                     fixed_call_id = f"call_{uuid.uuid4().hex[:24]}"
@@ -441,11 +480,13 @@ async def process_sse_event(event: dict, request_id: str) -> dict:
                             "arguments": fixed_args
                         }
                     }]
-                    logger.info(f"[{request_id}] Replaced fragments with complete fixed tool call")
+                    logger.info(f"[{request_id}] Replaced fragments with complete fixed tool call: {buffer.tool_name}")
                     del request_state.tool_buffers[main_buffer_key]
                 else:
-                    # Couldn't get fixed args, suppress fragments to prevent client errors
-                    logger.warning(f"[{request_id}] Failed to get fixed args, suppressing fragments")
+                    # Couldn't get fixed args or tool name, suppress fragments to prevent client errors
+                    if not buffer.tool_name:
+                        logger.warning(f"[{request_id}] Could not infer tool name from content: {buffer.content[:100]}...")
+                    logger.warning(f"[{request_id}] Failed to get fixed args or tool name, suppressing fragments")
                     delta["tool_calls"] = []
             else:
                 # Tool call incomplete, suppress fragments to prevent sending invalid data to client
@@ -559,7 +600,7 @@ async def process_remaining_buffers(request_id: str, response):
             try:
                 # Try to fix incomplete JSON
                 fixed_json = await try_fix_incomplete_json(buffer.content)
-                if fixed_json:
+                if fixed_json and buffer.tool_name:
                     args_obj = json.loads(fixed_json)
                     args_obj = fix_engine.apply_fixes(buffer.tool_name, args_obj, request_id)
                     fixed_args_str = json.dumps(args_obj, ensure_ascii=False)
@@ -588,6 +629,8 @@ async def process_remaining_buffers(request_id: str, response):
                         logger.info(f"[{request_id}] Sent completion for incomplete buffer {call_id}")
                     except Exception as write_error:
                         logger.warning(f"[{request_id}] Failed to write completion: {write_error}")
+                elif not buffer.tool_name:
+                    logger.warning(f"[{request_id}] Skipping completion for buffer {call_id} - could not infer tool name from: {buffer.content[:100]}...")
                         
             except Exception as e:
                 logger.warning(f"[{request_id}] Failed to process incomplete buffer {call_id}: {e}")
@@ -709,22 +752,59 @@ def infer_tool_name_from_content(content: str) -> str:
         return "edit"
     elif '"file_path"' in content and '"old_string"' in content and '"new_string"' in content:
         return "edit"
-    elif '"pattern"' in content and '"path"' in content:
-        return "glob"
     elif '"pattern"' in content and '"output_mode"' in content:
         return "grep"
+    elif '"pattern"' in content:
+        return "glob"  # Default pattern parameter to glob tool
     elif '"url"' in content and '"prompt"' in content:
         return "webfetch"
     elif '"query"' in content:
         return "websearch"
     elif '"content"' in content and ('"file_path"' in content or '"filePath"' in content):
         return "write"
+    elif '"file_path"' in content or '"filePath"' in content:
+        return "read"  # Default file path parameter to read tool
     elif '"description"' in content and '"prompt"' in content and '"subagent_type"' in content:
         return "task"
     elif '"notebook_path"' in content and '"new_source"' in content:
         return "notebookedit"
+    elif '"path"' in content:
+        return "list"  # Default path-only parameter to list tool (directory listing)
     
     return ""  # Unknown tool
+
+def detect_and_convert_xml_tool_call(content: str) -> dict:
+    """
+    Detect XML-format tool calls like <function=glob><parameter=pattern>*.py</parameter></function>
+    and convert them to OpenAI-compatible JSON format.
+    Handles both single and multiple parameters.
+    """
+    import re
+    
+    # First, extract the function name
+    function_match = re.search(r'<function=([^>]+)>', content)
+    if not function_match:
+        return None
+    
+    function_name = function_match.group(1).strip()
+    
+    # Find all parameters within this function call
+    # Pattern to match all parameters: <parameter=name>value</parameter>
+    param_pattern = r'<parameter=([^>]+)>\s*([^<]*?)\s*</parameter>'
+    param_matches = re.findall(param_pattern, content, re.DOTALL)
+    
+    if not param_matches:
+        return None
+    
+    # Create JSON arguments object from all parameters
+    args_obj = {}
+    for param_name, param_value in param_matches:
+        args_obj[param_name.strip()] = param_value.strip()
+    
+    return {
+        "function_name": function_name,
+        "arguments": args_obj
+    }
 
 async def get_fixed_arguments(buffer: ToolBuffer, request_id: str) -> str:
     """Get fixed arguments from buffer and return as JSON string"""
