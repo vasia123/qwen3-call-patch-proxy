@@ -16,6 +16,7 @@ Qwen3-Coder models generate tool calls with format inconsistencies that cause er
 This proxy intercepts HTTP requests between your Qwen3 model server and OpenCode, automatically:
 
 ✅ **Consolidates fragmented tool calls** across multiple SSE events  
+✅ **Converts XML-format tool calls to JSON** when streamed across multiple events  
 ✅ **Converts string parameters to proper types** (string→array, string→boolean)  
 ✅ **Generates proper tool call IDs** in OpenCode format (`call_<24_hex_chars>`)  
 ✅ **Adds missing required parameters** with sensible defaults  
@@ -29,6 +30,12 @@ Here's OpenCode successfully creating Conway's Game of Life using Qwen3-Coder wi
 <img src="images/OpenCode-Qwen3-Coder-GameOfLife.png" alt="OpenCode creating Game of Life with Qwen3-Coder" width="600">
 
 *OpenCode planning and implementing a complete Game of Life with GUI using Qwen3-Coder model through the proxy*
+
+## Tested Models
+
+This proxy has been thoroughly tested with:
+
+- **unsloth/Qwen3-Coder-30B-A3B-Instruct**
 
 ## Quick Start
 
@@ -70,15 +77,23 @@ OpenCode ←── Fixed responses ←──── Qwen3 Server
 
 ## Supported Tools
 
-| Tool | Fixes Applied |
-|------|---------------|
-| **TodoWrite** | Convert `todos` string to array |
-| **Edit** | Convert `replaceAll`/`replace_all` string to boolean |
-| **Bash** | Add default `description` if missing |
-| **Task** | Add default `subagent_type` if missing |
-| **MultiEdit** | Convert `edits` string to array |
-| **Glob** | Add default `path` if missing |
-| **Grep** | Validate `output_mode` enum values |
+Available tools (all lowercase as per OpenCode specification):
+
+| Tool | Description | Fixes Applied |
+|------|-------------|---------------|
+| **bash** | Execute shell commands | Add default `description` if missing |
+| **edit** | Modify existing files | Convert `replaceAll`/`replace_all` string to boolean |
+| **write** | Create new files | Handle file path and content parameters |
+| **read** | Read file contents | Convert to `write` when `content` provided (LLM confusion fix) |
+| **grep** | Search file contents | Validate `output_mode` enum values |
+| **glob** | Find files by pattern | Add default `path` if missing |
+| **list** | List directory contents | Handle path parameter |
+| **patch** | Apply patches to files | Handle patch parameters |
+| **todowrite** | Manage todo lists | Convert `todos` string to array, fix malformed JSON (single quotes→double quotes) |
+| **todoread** | Read todo lists | Handle todo parameters |
+| **webfetch** | Fetch web content | Handle URL and prompt parameters |
+| **task** | Execute tasks with agents | Add default `subagent_type` if missing |
+| **multiedit** | Multiple file edits | Convert `edits` string to array |
 
 ## Examples
 
@@ -139,22 +154,43 @@ settings:
 - `parse_json_object` - Parse JSON string into object  
 - `convert_string_to_boolean` - Convert string to boolean
 - `set_default` - Set default value if missing
+- `remove_parameter` - Remove unwanted parameter from tool call
+- `convert_tool_to_write` - Convert read+content calls to write calls (LLM intent fix)
 
 ### Fix Conditions
 - `is_string` - Parameter is a string
 - `missing` - Parameter is missing
 - `missing_or_empty` - Parameter is missing or empty
+- `exists` - Parameter exists (opposite of missing)
 - `invalid_enum` - Parameter not in valid values list
 
 ## Monitoring & Health Checks
 
 - **Health check:** `GET http://localhost:7999/_health`
 - **Reload config:** `POST http://localhost:7999/_reload`
-- **Logs:** Check console output or redirect to file
+
+### Logging Structure
+
+The proxy uses a **dual logging system**:
+
+**Console Output (clean, easy to follow):**
+- 🔧 Tool calls and adaptations 
+- 🔀 XML to JSON conversions
+- ⚙️ Configuration changes
+- 📡 Server status messages
+
+**Detailed Logs (`./logs/proxy_detailed.log`):**
+- Complete HTTP request/response communication
+- SSE event streams with full JSON
+- Buffer management and fragment processing
+- Debug traces with function names and line numbers
 
 ```bash
-# Run with logging
-python call_patch_proxy.py > proxy.log 2>&1 &
+# Start the proxy (clean console output)
+python call_patch_proxy.py
+
+# Monitor detailed logs in another terminal
+tail -f logs/proxy_detailed.log
 ```
 
 Response example:

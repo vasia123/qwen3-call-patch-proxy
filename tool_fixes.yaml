@@ -77,6 +77,16 @@ tools:
         default_value: "general-purpose"
         description: "Add default subagent_type"
 
+  read:
+    # Fix read tool when LLM incorrectly provides content parameter
+    # This indicates the LLM wants to WRITE, not READ
+    fixes:
+      - name: "convert_read_with_content_to_write"
+        parameter: "content"
+        condition: "exists"
+        action: "convert_tool_to_write"
+        description: "Convert read+content to write tool (LLM means to create file, not read it)"
+
 # Global settings
 settings:
   # Timeout for clearing abandoned buffers (seconds) 
