@@ -68,11 +68,8 @@ This proxy has been thoroughly tested with:
 ### Architecture
 
 ```
-OpenCode ──→ Proxy (port 7999) ──→ Qwen3 Server (port 8080)
-                    ↓
-                Fix tool calls
-                    ↓
-OpenCode ←── Fixed responses ←──── Qwen3 Server
+OpenCode ──→ Proxy (7999) ──→ Qwen3 Server (8080)
+             [Fixes tool calls]
 ```
 
 ## Supported Tools
