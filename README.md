@@ -2,7 +2,7 @@
 
 A robust HTTP proxy server that fixes malformed tool calls from Qwen3-Coder LLM models before sending them to OpenCode or other downstream services.
 
-> **Note:** This proxy is primarily developed for [OpenCode](https://github.com/1rgs/opencode), but may be useful for other LLM environments requiring tool call format fixes.
+> **Note:** This proxy is primarily developed for [OpenCode](https://github.com/sst/opencode), but may be useful for other LLM environments requiring tool call format fixes.
 
 ## What It Does
 
