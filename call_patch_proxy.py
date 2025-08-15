@@ -393,6 +393,14 @@ async def handle_request(request: web.Request):
 
                 await response.write_eof()
                 return response
+    except aiohttp.client_exceptions.ServerDisconnectedError:
+        logger.info(f"[{request_id}] Backend server disconnected - this is normal when client interrupts")
+        # Return a proper HTTP response for disconnections
+        return web.Response(status=502, text="Backend server disconnected")
+    except aiohttp.client_exceptions.ClientConnectionResetError:
+        logger.info(f"[{request_id}] Client connection reset - this is normal when client disconnects")
+        # Client disconnected, nothing to return
+        return web.Response(status=499, text="Client disconnected")
     except Exception as e:
         logger.error(f"[{request_id}] Request handling error: {e}")
         raise
