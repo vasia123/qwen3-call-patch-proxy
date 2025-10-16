@@ -24,6 +24,7 @@ import logging
 import re
 import yaml
 import asyncio
+import ssl
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
@@ -532,7 +533,17 @@ async def handle_request(request: web.Request):
             use_legacy_mode = force_legacy or legacy_mode_detected
 
             try:
-                async with aiohttp.ClientSession() as session:
+                # Create SSL context that ignores certificate verification
+                # This is needed for backends with self-signed or custom certificates
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+
+                logger.debug(f"[{request_id}] Using SSL context with disabled certificate verification")
+
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
+
+                async with aiohttp.ClientSession(connector=connector) as session:
                     async with session.request(method=request.method, url=target_url,
                                                headers=headers, data=data, allow_redirects=False) as resp:
                         logger.debug(f"[{request_id}] <-- {resp.status} {resp.reason} from backend (attempt {retry_count + 1})")
