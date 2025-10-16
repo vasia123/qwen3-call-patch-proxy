@@ -313,6 +313,77 @@ class ToolFixEngine:
 # Global instances
 fix_engine = ToolFixEngine(CONFIG_FILE)
 request_states: Dict[str, RequestState] = {}
+# Track if we've detected legacy API mode automatically
+legacy_mode_detected = False
+
+async def read_legacy_stream(resp, request_id: str):
+    """
+    Robust streaming reader for legacy APIs with incorrect HTTP headers.
+
+    This function reads the response in small chunks and manually parses SSE events,
+    avoiding issues with incorrect Transfer-Encoding headers.
+
+    Yields raw_line bytes for each complete line found in the stream.
+    """
+    chunk_size = fix_engine.get_setting('legacy_read_chunk_size', 8192)
+    read_timeout = fix_engine.get_setting('legacy_read_timeout', 30)
+
+    buffer = b""  # Buffer for incomplete lines
+
+    logger.info(f"[{request_id}] Using legacy stream reading mode (chunk_size={chunk_size})")
+
+    try:
+        while True:
+            try:
+                # Read a chunk with timeout
+                chunk = await asyncio.wait_for(
+                    resp.content.read(chunk_size),
+                    timeout=read_timeout
+                )
+
+                if not chunk:
+                    # End of stream
+                    if buffer:
+                        # Yield any remaining data in buffer
+                        yield buffer
+                    break
+
+                # Add chunk to buffer
+                buffer += chunk
+
+                # Split buffer by newlines and process complete lines
+                lines = buffer.split(b'\n')
+
+                # Keep the last incomplete line in buffer
+                buffer = lines[-1]
+
+                # Yield all complete lines
+                for line in lines[:-1]:
+                    # Add newline back since we split by it
+                    yield line + b'\n'
+
+            except asyncio.TimeoutError:
+                logger.warning(f"[{request_id}] Read timeout in legacy mode, continuing...")
+                # Timeout is not fatal, continue reading
+                continue
+            except aiohttp.client_exceptions.ClientPayloadError as e:
+                # This is the error we're trying to avoid, but if it happens in legacy mode,
+                # log it and try to continue
+                logger.warning(f"[{request_id}] Payload error in legacy mode (continuing): {e}")
+                # If we have data in buffer, yield it before breaking
+                if buffer:
+                    yield buffer
+                break
+            except Exception as e:
+                logger.error(f"[{request_id}] Unexpected error in legacy stream: {e}")
+                # Try to yield buffer before breaking
+                if buffer:
+                    yield buffer
+                break
+
+    except Exception as e:
+        logger.error(f"[{request_id}] Fatal error in legacy stream reader: {e}")
+        raise
 
 async def handle_request(request: web.Request):
     # Generate unique request ID for correlation
@@ -344,55 +415,93 @@ async def handle_request(request: web.Request):
                     response.headers.pop(hop, None)
                 await response.prepare(request)
 
-                async for raw_line in resp.content:
-                    try:
-                        line = raw_line.decode("utf-8")
-                    except UnicodeDecodeError:
-                        await response.write(raw_line)
-                        continue
+                # Determine if we should use legacy mode
+                global legacy_mode_detected
+                use_legacy_mode = (
+                    fix_engine.get_setting('legacy_api_mode', False) or
+                    legacy_mode_detected
+                )
 
-                    if not line.startswith("data:"):
-                        await response.write(raw_line)
-                        continue
+                # Choose the appropriate stream reader
+                if use_legacy_mode:
+                    stream_iterator = read_legacy_stream(resp, request_id)
+                else:
+                    stream_iterator = resp.content
 
-                    payload = line[len("data:"):].strip()
-                    if payload == "[DONE]":
-                        # Process any remaining incomplete buffers before cleanup
-                        await process_remaining_buffers(request_id, response)
-                        logger.debug(f"[{request_id}] Stream ended, cleaning up buffers")
-                        await cleanup_request(request_id)
-                        await response.write(raw_line)
-                        continue
+                try:
+                    async for raw_line in stream_iterator:
+                        try:
+                            line = raw_line.decode("utf-8")
+                        except UnicodeDecodeError:
+                            await response.write(raw_line)
+                            continue
 
-                    try:
-                        event = json.loads(payload)
-                    except json.JSONDecodeError as e:
-                        logger.warning(f"[{request_id}] Invalid JSON in SSE: {e}")
-                        await response.write(raw_line)
-                        continue
+                        if not line.startswith("data:"):
+                            await response.write(raw_line)
+                            continue
 
-                    try:
-                        fixed_event = await process_sse_event(event, request_id)
-                        new_payload = json.dumps(fixed_event, ensure_ascii=False)
-                        
-                        # Log detailed SSE output for debugging (file only)
-                        logger.debug(f"[{request_id}] SSE Event: {json.dumps(fixed_event, indent=2)}")
-                        if "tool_calls" in fixed_event.get("choices", [{}])[0].get("delta", {}):
-                            tool_calls = fixed_event["choices"][0]["delta"]["tool_calls"]
-                            for i, tool_call in enumerate(tool_calls):
-                                logger.debug(f"[{request_id}] SSE Tool Call {i}: {json.dumps(tool_call, indent=2)}")
-                        
-                        await response.write(f"data: {new_payload}\n\n".encode("utf-8"))
-                    except aiohttp.client_exceptions.ClientConnectionResetError:
-                        logger.warning(f"[{request_id}] Client connection reset, stopping stream")
-                        break
-                    except Exception as e:
-                        logger.error(f"[{request_id}] Error processing SSE event: {e}")
-                        # Write original event on processing error
-                        await response.write(raw_line)
+                        payload = line[len("data:"):].strip()
+                        if payload == "[DONE]":
+                            # Process any remaining incomplete buffers before cleanup
+                            await process_remaining_buffers(request_id, response)
+                            logger.debug(f"[{request_id}] Stream ended, cleaning up buffers")
+                            await cleanup_request(request_id)
+                            await response.write(raw_line)
+                            continue
 
-                await response.write_eof()
-                return response
+                        try:
+                            event = json.loads(payload)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"[{request_id}] Invalid JSON in SSE: {e}")
+                            await response.write(raw_line)
+                            continue
+
+                        try:
+                            fixed_event = await process_sse_event(event, request_id)
+                            new_payload = json.dumps(fixed_event, ensure_ascii=False)
+
+                            # Log detailed SSE output for debugging (file only)
+                            logger.debug(f"[{request_id}] SSE Event: {json.dumps(fixed_event, indent=2)}")
+                            if "tool_calls" in fixed_event.get("choices", [{}])[0].get("delta", {}):
+                                tool_calls = fixed_event["choices"][0]["delta"]["tool_calls"]
+                                for i, tool_call in enumerate(tool_calls):
+                                    logger.debug(f"[{request_id}] SSE Tool Call {i}: {json.dumps(tool_call, indent=2)}")
+
+                            await response.write(f"data: {new_payload}\n\n".encode("utf-8"))
+                        except aiohttp.client_exceptions.ClientConnectionResetError:
+                            logger.warning(f"[{request_id}] Client connection reset, stopping stream")
+                            break
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error processing SSE event: {e}")
+                            # Write original event on processing error
+                            await response.write(raw_line)
+
+                    await response.write_eof()
+                    return response
+                except aiohttp.client_exceptions.ClientPayloadError as e:
+                    # Legacy API detected - switch to legacy mode for future requests
+                    if fix_engine.get_setting('auto_detect_legacy', True) and not use_legacy_mode:
+                        logger.error(f"[{request_id}] ClientPayloadError detected, enabling legacy mode for future requests: {e}")
+                        console_logger.info(f"[{request_id}] 🔄 Legacy API detected, switching to compatible mode")
+                        legacy_mode_detected = True
+                        # For this request, retry with legacy mode
+                        logger.info(f"[{request_id}] Retrying with legacy stream reader...")
+
+                        # Reset response (we haven't written much yet hopefully)
+                        try:
+                            await response.write_eof()
+                        except:
+                            pass
+
+                        # Return error - client should retry
+                        return web.Response(
+                            status=502,
+                            text="Legacy API mode required. Please retry your request."
+                        )
+                    else:
+                        # Already in legacy mode or auto-detect is disabled
+                        logger.error(f"[{request_id}] ClientPayloadError in legacy mode: {e}")
+                        raise
     except aiohttp.client_exceptions.ServerDisconnectedError:
         logger.info(f"[{request_id}] Backend server disconnected - this is normal when client interrupts")
         # Return a proper HTTP response for disconnections
@@ -924,6 +1033,8 @@ async def health_check(request: web.Request):
         'total_buffers': sum(len(state.tool_buffers) for state in request_states.values()),
         'config_loaded': bool(fix_engine.config),
         'target_host': TARGET_HOST,
+        'legacy_mode': fix_engine.get_setting('legacy_api_mode', False) or legacy_mode_detected,
+        'legacy_mode_auto_detected': legacy_mode_detected,
         'uptime': 'unknown'  # Could track start time
     }
     return web.json_response(stats)
@@ -953,6 +1064,17 @@ def main():
     console_logger.info(f"   📡 Listening: 0.0.0.0:{LISTEN_PORT}")
     console_logger.info(f"   🎯 Target: {TARGET_HOST}")
     console_logger.info(f"   ⚙️  Config: {CONFIG_FILE}")
+
+    # Show legacy mode status
+    legacy_mode = fix_engine.get_setting('legacy_api_mode', False)
+    auto_detect = fix_engine.get_setting('auto_detect_legacy', True)
+    if legacy_mode:
+        console_logger.info(f"   🔄 Legacy API mode: ENABLED (forced)")
+    elif auto_detect:
+        console_logger.info(f"   🔄 Legacy API mode: AUTO-DETECT enabled")
+    else:
+        console_logger.info(f"   🔄 Legacy API mode: DISABLED")
+
     logger.info(f"   Health check: http://localhost:{LISTEN_PORT}/_health")
     logger.info(f"   Reload config: POST http://localhost:{LISTEN_PORT}/_reload")
     

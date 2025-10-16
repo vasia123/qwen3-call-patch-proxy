@@ -89,14 +89,26 @@ tools:
 
 # Global settings
 settings:
-  # Timeout for clearing abandoned buffers (seconds) 
+  # Timeout for clearing abandoned buffers (seconds)
   buffer_timeout: 120  # Increased to 2 minutes for long tool calls
-  
+
   # Maximum buffer size per tool call (bytes)
   max_buffer_size: 1048576  # 1MB
-  
+
   # Enable detailed logging
   detailed_logging: true
-  
+
   # Case sensitive tool name matching
   case_sensitive_tools: false
+
+  # Legacy API compatibility mode (for models with incorrect HTTP headers)
+  legacy_api_mode: false  # Set to true to always use legacy mode
+
+  # Auto-detect legacy API issues and switch to legacy mode automatically
+  auto_detect_legacy: true
+
+  # Chunk size for reading in legacy mode (bytes)
+  legacy_read_chunk_size: 8192  # 8KB chunks
+
+  # Timeout for reading chunks in legacy mode (seconds)
+  legacy_read_timeout: 30
