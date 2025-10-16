@@ -316,6 +316,48 @@ request_states: Dict[str, RequestState] = {}
 # Track if we've detected legacy API mode automatically
 legacy_mode_detected = False
 
+def extract_model_from_request(data: bytes) -> Optional[str]:
+    """
+    Extract model name from request body.
+
+    Returns model name if found, None otherwise.
+    """
+    if not data:
+        return None
+
+    try:
+        body = json.loads(data)
+        return body.get('model')
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+def should_use_legacy_mode_for_model(model_name: Optional[str]) -> bool:
+    """
+    Check if a model should use legacy API mode.
+
+    Returns True if:
+    - Model is in legacy_models list
+    - Legacy mode is globally enabled
+    - Legacy mode was auto-detected
+    """
+    global legacy_mode_detected
+
+    # Check if legacy mode is forced globally
+    if fix_engine.get_setting('legacy_api_mode', False):
+        return True
+
+    # Check if legacy mode was auto-detected
+    if legacy_mode_detected:
+        return True
+
+    # Check if model is in legacy models list
+    if model_name:
+        legacy_models = fix_engine.get_setting('legacy_models', [])
+        if model_name in legacy_models:
+            return True
+
+    return False
+
 async def read_legacy_stream(resp, request_id: str):
     """
     Robust streaming reader for legacy APIs with incorrect HTTP headers.
@@ -386,6 +428,14 @@ async def read_legacy_stream(resp, request_id: str):
         raise
 
 async def handle_request(request: web.Request):
+    """
+    Main request handler with automatic retry for legacy API support.
+
+    Features:
+    - Extract model name from request to check if legacy mode needed
+    - Automatically retry with legacy mode on ClientPayloadError
+    - Transparent retry without client intervention
+    """
     # Generate unique request ID for correlation
     request_id = str(uuid.uuid4())[:8]
     target_url = f"{TARGET_HOST}{request.rel_url}"
@@ -393,7 +443,7 @@ async def handle_request(request: web.Request):
 
     # Create request state
     request_states[request_id] = RequestState(request_id=request_id)
-    
+
     # Start buffer cleanup task
     cleanup_task = asyncio.create_task(periodic_cleanup(request_id))
 
@@ -404,111 +454,123 @@ async def handle_request(request: web.Request):
     if data and fix_engine.get_setting('detailed_logging', True):
         logger.debug(f"[{request_id}] Request body ({len(data)} bytes): {data[:500]!r}")
 
+    # Extract model name and check if we should use legacy mode
+    model_name = extract_model_from_request(data)
+    force_legacy = should_use_legacy_mode_for_model(model_name)
+
+    if model_name and force_legacy:
+        legacy_models = fix_engine.get_setting('legacy_models', [])
+        if model_name in legacy_models:
+            console_logger.info(f"[{request_id}] 🔄 Using legacy mode for model: {model_name}")
+            logger.info(f"[{request_id}] Model {model_name} configured for legacy API mode")
+
+    # Track retry attempts
+    retry_count = 0
+    max_retries = 1 if fix_engine.get_setting('auto_retry_legacy', True) else 0
+    global legacy_mode_detected
+
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.request(method=request.method, url=target_url,
-                                       headers=headers, data=data, allow_redirects=False) as resp:
-                logger.debug(f"[{request_id}] <-- {resp.status} {resp.reason} from backend")
+        while retry_count <= max_retries:
+            # Determine if we should use legacy mode for this attempt
+            use_legacy_mode = force_legacy or legacy_mode_detected
 
-                response = web.StreamResponse(status=resp.status, reason=resp.reason, headers=resp.headers)
-                for hop in ("transfer-encoding", "connection", "content-length"):
-                    response.headers.pop(hop, None)
-                await response.prepare(request)
+            try:
+                async with aiohttp.ClientSession() as session:
+                    async with session.request(method=request.method, url=target_url,
+                                               headers=headers, data=data, allow_redirects=False) as resp:
+                        logger.debug(f"[{request_id}] <-- {resp.status} {resp.reason} from backend (attempt {retry_count + 1})")
 
-                # Determine if we should use legacy mode
-                global legacy_mode_detected
-                use_legacy_mode = (
-                    fix_engine.get_setting('legacy_api_mode', False) or
-                    legacy_mode_detected
-                )
+                        # Prepare response but don't send yet
+                        response = web.StreamResponse(status=resp.status, reason=resp.reason, headers=resp.headers)
+                        for hop in ("transfer-encoding", "connection", "content-length"):
+                            response.headers.pop(hop, None)
+                        await response.prepare(request)
 
-                # Choose the appropriate stream reader
-                if use_legacy_mode:
-                    stream_iterator = read_legacy_stream(resp, request_id)
+                        # Choose the appropriate stream reader
+                        if use_legacy_mode:
+                            stream_iterator = read_legacy_stream(resp, request_id)
+                        else:
+                            stream_iterator = resp.content
+
+                        # Process and forward the stream
+                        async for raw_line in stream_iterator:
+                            try:
+                                line = raw_line.decode("utf-8")
+                            except UnicodeDecodeError:
+                                await response.write(raw_line)
+                                continue
+
+                            if not line.startswith("data:"):
+                                await response.write(raw_line)
+                                continue
+
+                            payload = line[len("data:"):].strip()
+                            if payload == "[DONE]":
+                                # Process any remaining incomplete buffers before cleanup
+                                await process_remaining_buffers(request_id, response)
+                                logger.debug(f"[{request_id}] Stream ended, cleaning up buffers")
+                                await cleanup_request(request_id)
+                                await response.write(raw_line)
+                                continue
+
+                            try:
+                                event = json.loads(payload)
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"[{request_id}] Invalid JSON in SSE: {e}")
+                                await response.write(raw_line)
+                                continue
+
+                            try:
+                                fixed_event = await process_sse_event(event, request_id)
+                                new_payload = json.dumps(fixed_event, ensure_ascii=False)
+
+                                # Log detailed SSE output for debugging (file only)
+                                logger.debug(f"[{request_id}] SSE Event: {json.dumps(fixed_event, indent=2)}")
+                                if "tool_calls" in fixed_event.get("choices", [{}])[0].get("delta", {}):
+                                    tool_calls = fixed_event["choices"][0]["delta"]["tool_calls"]
+                                    for i, tool_call in enumerate(tool_calls):
+                                        logger.debug(f"[{request_id}] SSE Tool Call {i}: {json.dumps(tool_call, indent=2)}")
+
+                                await response.write(f"data: {new_payload}\n\n".encode("utf-8"))
+                            except aiohttp.client_exceptions.ClientConnectionResetError:
+                                logger.warning(f"[{request_id}] Client connection reset, stopping stream")
+                                break
+                            except Exception as e:
+                                logger.error(f"[{request_id}] Error processing SSE event: {e}")
+                                # Write original event on processing error
+                                await response.write(raw_line)
+
+                        await response.write_eof()
+                        return response
+
+            except aiohttp.client_exceptions.ClientPayloadError as e:
+                # Legacy API detected
+                if retry_count < max_retries and not use_legacy_mode:
+                    # Enable legacy mode and retry
+                    logger.error(f"[{request_id}] ClientPayloadError detected on attempt {retry_count + 1}: {e}")
+                    console_logger.info(f"[{request_id}] 🔄 Legacy API detected, retrying with compatible mode...")
+                    legacy_mode_detected = True
+                    retry_count += 1
+
+                    # Wait a bit before retry
+                    await asyncio.sleep(0.1)
+                    continue
                 else:
-                    stream_iterator = resp.content
+                    # Already tried with legacy mode or retries disabled
+                    logger.error(f"[{request_id}] ClientPayloadError in legacy mode: {e}")
+                    return web.Response(
+                        status=502,
+                        text=f"Backend server error: {str(e)}"
+                    )
 
-                try:
-                    async for raw_line in stream_iterator:
-                        try:
-                            line = raw_line.decode("utf-8")
-                        except UnicodeDecodeError:
-                            await response.write(raw_line)
-                            continue
+            # If we reach here without exception, request succeeded
+            break
 
-                        if not line.startswith("data:"):
-                            await response.write(raw_line)
-                            continue
-
-                        payload = line[len("data:"):].strip()
-                        if payload == "[DONE]":
-                            # Process any remaining incomplete buffers before cleanup
-                            await process_remaining_buffers(request_id, response)
-                            logger.debug(f"[{request_id}] Stream ended, cleaning up buffers")
-                            await cleanup_request(request_id)
-                            await response.write(raw_line)
-                            continue
-
-                        try:
-                            event = json.loads(payload)
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"[{request_id}] Invalid JSON in SSE: {e}")
-                            await response.write(raw_line)
-                            continue
-
-                        try:
-                            fixed_event = await process_sse_event(event, request_id)
-                            new_payload = json.dumps(fixed_event, ensure_ascii=False)
-
-                            # Log detailed SSE output for debugging (file only)
-                            logger.debug(f"[{request_id}] SSE Event: {json.dumps(fixed_event, indent=2)}")
-                            if "tool_calls" in fixed_event.get("choices", [{}])[0].get("delta", {}):
-                                tool_calls = fixed_event["choices"][0]["delta"]["tool_calls"]
-                                for i, tool_call in enumerate(tool_calls):
-                                    logger.debug(f"[{request_id}] SSE Tool Call {i}: {json.dumps(tool_call, indent=2)}")
-
-                            await response.write(f"data: {new_payload}\n\n".encode("utf-8"))
-                        except aiohttp.client_exceptions.ClientConnectionResetError:
-                            logger.warning(f"[{request_id}] Client connection reset, stopping stream")
-                            break
-                        except Exception as e:
-                            logger.error(f"[{request_id}] Error processing SSE event: {e}")
-                            # Write original event on processing error
-                            await response.write(raw_line)
-
-                    await response.write_eof()
-                    return response
-                except aiohttp.client_exceptions.ClientPayloadError as e:
-                    # Legacy API detected - switch to legacy mode for future requests
-                    if fix_engine.get_setting('auto_detect_legacy', True) and not use_legacy_mode:
-                        logger.error(f"[{request_id}] ClientPayloadError detected, enabling legacy mode for future requests: {e}")
-                        console_logger.info(f"[{request_id}] 🔄 Legacy API detected, switching to compatible mode")
-                        legacy_mode_detected = True
-                        # For this request, retry with legacy mode
-                        logger.info(f"[{request_id}] Retrying with legacy stream reader...")
-
-                        # Reset response (we haven't written much yet hopefully)
-                        try:
-                            await response.write_eof()
-                        except:
-                            pass
-
-                        # Return error - client should retry
-                        return web.Response(
-                            status=502,
-                            text="Legacy API mode required. Please retry your request."
-                        )
-                    else:
-                        # Already in legacy mode or auto-detect is disabled
-                        logger.error(f"[{request_id}] ClientPayloadError in legacy mode: {e}")
-                        raise
     except aiohttp.client_exceptions.ServerDisconnectedError:
         logger.info(f"[{request_id}] Backend server disconnected - this is normal when client interrupts")
-        # Return a proper HTTP response for disconnections
         return web.Response(status=502, text="Backend server disconnected")
     except aiohttp.client_exceptions.ClientConnectionResetError:
         logger.info(f"[{request_id}] Client connection reset - this is normal when client disconnects")
-        # Client disconnected, nothing to return
         return web.Response(status=499, text="Client disconnected")
     except Exception as e:
         logger.error(f"[{request_id}] Request handling error: {e}")
@@ -1035,6 +1097,8 @@ async def health_check(request: web.Request):
         'target_host': TARGET_HOST,
         'legacy_mode': fix_engine.get_setting('legacy_api_mode', False) or legacy_mode_detected,
         'legacy_mode_auto_detected': legacy_mode_detected,
+        'legacy_models': fix_engine.get_setting('legacy_models', []),
+        'auto_retry_legacy': fix_engine.get_setting('auto_retry_legacy', True),
         'uptime': 'unknown'  # Could track start time
     }
     return web.json_response(stats)

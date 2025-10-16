@@ -112,3 +112,12 @@ settings:
 
   # Timeout for reading chunks in legacy mode (seconds)
   legacy_read_timeout: 30
+
+  # List of model names that always use legacy API mode
+  # Add your model names here (e.g., "qwen3-235b-it", "qwen-235b")
+  legacy_models:
+    - "qwen3-235b-it"
+    - "qwen-235b"
+
+  # Automatically retry request in legacy mode on ClientPayloadError
+  auto_retry_legacy: true
