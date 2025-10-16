@@ -362,24 +362,31 @@ async def read_legacy_stream(resp, request_id: str):
     """
     Robust streaming reader for legacy APIs with incorrect HTTP headers.
 
-    This function reads the response using iter_any() which bypasses aiohttp's
-    Transfer-Encoding parser, avoiding issues with incorrect headers.
+    This function reads the response using readany() which directly reads raw bytes
+    from the TCP socket, completely bypassing aiohttp's Transfer-Encoding parser.
 
     Yields raw_line bytes for each complete line found in the stream.
     """
-    chunk_size = fix_engine.get_setting('legacy_read_chunk_size', 8192)
     read_timeout = fix_engine.get_setting('legacy_read_timeout', 30)
 
     buffer = b""  # Buffer for incomplete lines
 
-    logger.info(f"[{request_id}] Using legacy stream reading mode (bypassing Transfer-Encoding parser)")
+    logger.info(f"[{request_id}] Using legacy stream reading mode (raw socket reading with readany())")
 
     try:
-        # Use iter_any() instead of read() to bypass Transfer-Encoding checks
-        async for chunk in resp.content.iter_any():
+        while True:
             try:
+                # readany() reads any available bytes from socket without checking Transfer-Encoding
+                # This is the lowest-level read API in aiohttp
+                chunk = await asyncio.wait_for(
+                    resp.content.readany(),
+                    timeout=read_timeout
+                )
+
+                # Empty chunk means EOF (end of stream)
                 if not chunk:
-                    continue
+                    logger.debug(f"[{request_id}] EOF reached in legacy stream")
+                    break
 
                 # Add chunk to buffer
                 buffer += chunk
@@ -395,21 +402,25 @@ async def read_legacy_stream(resp, request_id: str):
                     # Add newline back since we split by it
                     yield line + b'\n'
 
-            except Exception as e:
-                logger.error(f"[{request_id}] Error processing chunk in legacy stream: {e}")
-                # Continue reading despite errors
+            except asyncio.TimeoutError:
+                logger.warning(f"[{request_id}] Read timeout in legacy mode (no data for {read_timeout}s), continuing...")
+                # Timeout is not fatal, continue reading in case more data arrives
                 continue
+            except aiohttp.client_exceptions.ClientPayloadError as e:
+                # This should not happen with readany(), but log it if it does
+                logger.warning(f"[{request_id}] Payload error with readany() (should not happen): {e}")
+                # Break instead of continue to avoid infinite loop
+                break
+            except Exception as e:
+                logger.error(f"[{request_id}] Unexpected error in legacy stream readany(): {e}")
+                # Break on unexpected errors to avoid infinite loop
+                break
 
         # End of stream - yield any remaining data in buffer
         if buffer:
             logger.debug(f"[{request_id}] Yielding final buffer: {len(buffer)} bytes")
             yield buffer
 
-    except aiohttp.client_exceptions.ClientPayloadError as e:
-        # This error should not happen with iter_any(), but handle it just in case
-        logger.warning(f"[{request_id}] Payload error in legacy mode (ending stream): {e}")
-        if buffer:
-            yield buffer
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in legacy stream reader: {e}")
         if buffer:
