@@ -374,20 +374,35 @@ async def read_legacy_stream(resp, request_id: str):
 
     logger.info(f"[{request_id}] Using legacy stream reading mode (chunk size: {chunk_size} bytes)")
 
+    chunk_count = 0
+    total_bytes_read = 0
+
     try:
         while True:
             try:
                 # read(n) reads up to n bytes with less strict Transfer-Encoding checks
                 # This is more reliable than readany() for servers with incorrect chunked headers
+                logger.debug(f"[{request_id}] Attempting to read chunk #{chunk_count + 1} (up to {chunk_size} bytes)...")
+
                 chunk = await asyncio.wait_for(
                     resp.content.read(chunk_size),
                     timeout=read_timeout
                 )
 
+                chunk_count += 1
+                chunk_size_actual = len(chunk) if chunk else 0
+                total_bytes_read += chunk_size_actual
+
+                logger.debug(f"[{request_id}] Read chunk #{chunk_count}: {chunk_size_actual} bytes (total: {total_bytes_read} bytes)")
+
                 # Empty chunk means EOF (end of stream)
                 if not chunk:
-                    logger.debug(f"[{request_id}] EOF reached in legacy stream")
+                    logger.debug(f"[{request_id}] EOF reached in legacy stream after {chunk_count} chunks")
                     break
+
+                # Log first bytes of chunk for debugging
+                preview = chunk[:100].decode('utf-8', errors='replace') if chunk else ''
+                logger.debug(f"[{request_id}] Chunk #{chunk_count} preview: {preview!r}...")
 
                 # Add chunk to buffer
                 buffer += chunk
@@ -399,6 +414,10 @@ async def read_legacy_stream(resp, request_id: str):
                 buffer = lines[-1]
 
                 # Yield all complete lines
+                complete_lines = len(lines) - 1
+                if complete_lines > 0:
+                    logger.debug(f"[{request_id}] Yielding {complete_lines} complete lines from chunk #{chunk_count}")
+
                 for line in lines[:-1]:
                     # Add newline back since we split by it
                     yield line + b'\n'
@@ -409,8 +428,11 @@ async def read_legacy_stream(resp, request_id: str):
                 continue
             except aiohttp.client_exceptions.ClientPayloadError as e:
                 # This is expected in legacy mode when backend has incorrect Transfer-Encoding headers
-                logger.info(f"[{request_id}] Transfer-Encoding error in legacy mode (expected): {e}")
-                logger.debug(f"[{request_id}] Buffer contains {len(buffer)} bytes when error occurred")
+                logger.info(f"[{request_id}] Transfer-Encoding error in legacy mode: {e}")
+                logger.info(f"[{request_id}] Stats at error: chunks_read={chunk_count}, total_bytes={total_bytes_read}, buffer_size={len(buffer)}")
+                if buffer:
+                    buffer_preview = buffer[:200].decode('utf-8', errors='replace')
+                    logger.debug(f"[{request_id}] Buffer content at error: {buffer_preview!r}...")
                 # Break to process any remaining buffer data and end the stream gracefully
                 break
             except Exception as e:
@@ -419,14 +441,18 @@ async def read_legacy_stream(resp, request_id: str):
                 break
 
         # End of stream - yield any remaining data in buffer
+        logger.info(f"[{request_id}] Legacy stream ended: chunks={chunk_count}, total_bytes={total_bytes_read}, buffer_size={len(buffer)}")
         if buffer:
             logger.debug(f"[{request_id}] Yielding final buffer: {len(buffer)} bytes")
+            buffer_preview = buffer[:200].decode('utf-8', errors='replace')
+            logger.debug(f"[{request_id}] Final buffer preview: {buffer_preview!r}...")
             yield buffer
         else:
             logger.debug(f"[{request_id}] No remaining data in buffer at stream end")
 
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in legacy stream reader: {e}")
+        logger.error(f"[{request_id}] Stats at fatal error: chunks={chunk_count}, total_bytes={total_bytes_read}, buffer_size={len(buffer)}")
         if buffer:
             yield buffer
         raise
@@ -483,6 +509,13 @@ async def handle_request(request: web.Request):
                     async with session.request(method=request.method, url=target_url,
                                                headers=headers, data=data, allow_redirects=False) as resp:
                         logger.debug(f"[{request_id}] <-- {resp.status} {resp.reason} from backend (attempt {retry_count + 1})")
+
+                        # Log response headers for debugging
+                        logger.debug(f"[{request_id}] Backend response headers: {dict(resp.headers)}")
+                        if 'content-length' in resp.headers:
+                            logger.debug(f"[{request_id}] Content-Length: {resp.headers['content-length']}")
+                        if 'transfer-encoding' in resp.headers:
+                            logger.debug(f"[{request_id}] Transfer-Encoding: {resp.headers['transfer-encoding']}")
 
                         # Prepare response but don't send yet
                         response = web.StreamResponse(status=resp.status, reason=resp.reason, headers=resp.headers)
