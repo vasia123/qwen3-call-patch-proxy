@@ -362,33 +362,25 @@ async def read_legacy_stream(resp, request_id: str):
     """
     Robust streaming reader for legacy APIs with incorrect HTTP headers.
 
-    This function reads the response using read(chunk_size) which reads fixed-size chunks
-    with minimal Transfer-Encoding validation, making it more tolerant of incorrect headers.
+    This function reads the response using iter_any() which directly iterates raw bytes
+    from the socket, completely bypassing aiohttp's Transfer-Encoding parser.
 
     Yields raw_line bytes for each complete line found in the stream.
     """
     read_timeout = fix_engine.get_setting('legacy_read_timeout', 30)
-    chunk_size = fix_engine.get_setting('legacy_read_chunk_size', 8192)
 
     buffer = b""  # Buffer for incomplete lines
 
-    logger.info(f"[{request_id}] Using legacy stream reading mode (chunk size: {chunk_size} bytes)")
+    logger.info(f"[{request_id}] Using legacy stream reading mode (iter_any with timeout {read_timeout}s)")
 
     chunk_count = 0
     total_bytes_read = 0
 
     try:
-        while True:
+        # iter_any() yields chunks as they arrive from the socket
+        # It does NOT validate Transfer-Encoding headers
+        async for chunk in resp.content.iter_any():
             try:
-                # read(n) reads up to n bytes with less strict Transfer-Encoding checks
-                # This is more reliable than readany() for servers with incorrect chunked headers
-                logger.debug(f"[{request_id}] Attempting to read chunk #{chunk_count + 1} (up to {chunk_size} bytes)...")
-
-                chunk = await asyncio.wait_for(
-                    resp.content.read(chunk_size),
-                    timeout=read_timeout
-                )
-
                 chunk_count += 1
                 chunk_size_actual = len(chunk) if chunk else 0
                 total_bytes_read += chunk_size_actual
@@ -422,10 +414,6 @@ async def read_legacy_stream(resp, request_id: str):
                     # Add newline back since we split by it
                     yield line + b'\n'
 
-            except asyncio.TimeoutError:
-                logger.warning(f"[{request_id}] Read timeout in legacy mode (no data for {read_timeout}s), continuing...")
-                # Timeout is not fatal, continue reading in case more data arrives
-                continue
             except aiohttp.client_exceptions.ClientPayloadError as e:
                 # This is expected in legacy mode when backend has incorrect Transfer-Encoding headers
                 logger.info(f"[{request_id}] Transfer-Encoding error in legacy mode: {e}")
@@ -436,7 +424,8 @@ async def read_legacy_stream(resp, request_id: str):
                 # Break to process any remaining buffer data and end the stream gracefully
                 break
             except Exception as e:
-                logger.error(f"[{request_id}] Unexpected error in legacy stream read(): {e}")
+                logger.error(f"[{request_id}] Unexpected error in legacy stream iter_any(): {e}")
+                logger.error(f"[{request_id}] Stats at error: chunks={chunk_count}, total_bytes={total_bytes_read}")
                 # Break on unexpected errors to avoid infinite loop
                 break
 
